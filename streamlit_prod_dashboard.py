@@ -25,13 +25,6 @@ st.markdown("""
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        margin: 10px 0;
-    }
     div[data-testid="stMetricValue"] {
         font-size: 28px;
         font-weight: bold;
@@ -50,22 +43,48 @@ if 'processed_data' not in st.session_state:
 def parse_csv_file(uploaded_file):
     """Parse uploaded CSV file"""
     try:
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded_file, encoding='utf-8')
         return df
+    except UnicodeDecodeError:
+        try:
+            df = pd.read_csv(uploaded_file, encoding='latin-1')
+            return df
+        except Exception as e:
+            st.error(f"Error reading file with latin-1 encoding: {str(e)}")
+            return None
     except Exception as e:
         st.error(f"Error reading file: {str(e)}")
         return None
 
+def clean_column_names(df):
+    """Clean column names by stripping whitespace"""
+    df.columns = df.columns.str.strip()
+    return df
+
 def process_production_data(raw_df, lookup_df=None):
     """Process production data with team mapping"""
     try:
+        # Clean column names
+        raw_df = clean_column_names(raw_df)
+        if lookup_df is not None:
+            lookup_df = clean_column_names(lookup_df)
+        
+        st.info(f"Processing {len(raw_df)} rows from CSV...")
+        
+        # Show available columns for debugging
+        st.write("Available columns:", list(raw_df.columns))
+        
         processed_data = []
         
-        for _, row in raw_df.iterrows():
-            # Get agent name from either column
-            agent_name = row.get('Disp', row.get('Employee name', ''))
+        for idx, row in raw_df.iterrows():
+            # Get agent name - try multiple column names
+            agent_name = None
+            for col in ['Disp', 'Employee name', 'Agent', 'Name']:
+                if col in row and pd.notna(row[col]) and str(row[col]).strip():
+                    agent_name = str(row[col]).strip()
+                    break
             
-            if not agent_name or pd.isna(agent_name):
+            if not agent_name:
                 continue
             
             # Default team to UK
@@ -73,38 +92,80 @@ def process_production_data(raw_df, lookup_df=None):
             
             # Try to find team from lookup data
             if lookup_df is not None and not lookup_df.empty:
-                lookup_match = lookup_df[
-                    lookup_df['Employee name'].str.contains(agent_name, case=False, na=False) |
-                    lookup_df.get('Disp', pd.Series()).str.contains(agent_name, case=False, na=False)
-                ]
-                if not lookup_match.empty:
-                    team = lookup_match.iloc[0].get('Team', 'UK')
+                for _, lookup_row in lookup_df.iterrows():
+                    lookup_name = str(lookup_row.get('Employee name', '')).strip()
+                    if agent_name.lower() in lookup_name.lower() or lookup_name.lower() in agent_name.lower():
+                        team = lookup_row.get('Team', 'UK')
+                        break
             
-            # Parse numeric values with error handling
-            cont_processed = pd.to_numeric(row.get('Cont Procsd ', row.get('Contacts Processed', 0)), errors='coerce') or 0
-            target = pd.to_numeric(row.get('Cont Proc - Target', row.get('Contact Processed Target', 0)), errors='coerce') or 0
-            eff_cont = pd.to_numeric(row.get('Eff   Cont ', row.get('Effective Contacts', 0)), errors='coerce') or 0
-            prod_percent = pd.to_numeric(row.get('Cont Proc - Prod%', row.get('Productivity Achieved %', 0)), errors='coerce') or 0
-            net_cont = pd.to_numeric(row.get('Net Cont', row.get('Net Contacts', 0)), errors='coerce') or 0
+            # Parse numeric values - try multiple column name variations
+            cont_processed = 0
+            for col in ['Cont Procsd', 'Cont Procsd ', 'Contacts Processed', 'Contact Processed']:
+                if col in row:
+                    val = pd.to_numeric(row[col], errors='coerce')
+                    if pd.notna(val):
+                        cont_processed = int(val)
+                        break
+            
+            target = 0
+            for col in ['Cont Proc - Target', 'Contact Processed Target', 'Target']:
+                if col in row:
+                    val = pd.to_numeric(row[col], errors='coerce')
+                    if pd.notna(val):
+                        target = int(val)
+                        break
+            
+            eff_cont = 0
+            for col in ['Eff   Cont', 'Eff Cont', 'Eff   Cont ', 'Effective Contacts', 'Effective Contacts Achieved']:
+                if col in row:
+                    val = pd.to_numeric(row[col], errors='coerce')
+                    if pd.notna(val):
+                        eff_cont = int(val)
+                        break
+            
+            # Parse productivity percentage
+            prod_percent = 0
+            for col in ['Cont Proc - Prod%', 'Productivity Achieved %', 'Productivity']:
+                if col in row:
+                    val = str(row[col]).replace('%', '').strip()
+                    val = pd.to_numeric(val, errors='coerce')
+                    if pd.notna(val):
+                        prod_percent = float(val)
+                        break
+            
+            net_cont = 0
+            for col in ['Net Cont', 'Net Contacts']:
+                if col in row:
+                    val = pd.to_numeric(row[col], errors='coerce')
+                    if pd.notna(val):
+                        net_cont = int(val)
+                        break
+            
+            # Get other fields
+            prod_hours = row.get('Prod Hours', '0:00:00')
+            level = row.get('Level', 'L2')
             
             processed_data.append({
                 'Agent': agent_name,
                 'Team': team,
-                'Contacts_Processed': int(cont_processed),
-                'Target': int(target),
-                'Deficit': int(target - cont_processed),
-                'Productivity': float(prod_percent),
-                'Effective_Contacts': int(eff_cont),
-                'Net_Contacts': int(net_cont),
-                'Prod_Hours': row.get('Prod Hours', '0:00:00'),
-                'Level': row.get('Level', 'L2'),
-                'Date': row.get('11-11-2025', row.get('>=25-09-2025', datetime.now().strftime('%d-%m-%Y')))
+                'Contacts_Processed': cont_processed,
+                'Target': target,
+                'Deficit': target - cont_processed,
+                'Productivity': prod_percent,
+                'Effective_Contacts': eff_cont,
+                'Net_Contacts': net_cont,
+                'Prod_Hours': prod_hours,
+                'Level': level,
+                'Date': datetime.now().strftime('%Y-%m-%d')
             })
         
-        return pd.DataFrame(processed_data)
+        result_df = pd.DataFrame(processed_data)
+        st.success(f"✅ Successfully processed {len(result_df)} agent records!")
+        return result_df
     
     except Exception as e:
-        st.error(f"Error processing data: {str(e)}")
+        st.error(f"❌ Error processing data: {str(e)}")
+        st.exception(e)  # Show full error trace
         return pd.DataFrame()
 
 def get_productivity_color(productivity):
@@ -286,8 +347,14 @@ def main():
         )
         
         if prod_file is not None:
-            st.session_state.raw_data = parse_csv_file(prod_file)
-            st.success(f"✅ Loaded {len(st.session_state.raw_data)} records")
+            raw_df = parse_csv_file(prod_file)
+            if raw_df is not None:
+                st.session_state.raw_data = raw_df
+                st.success(f"✅ Loaded {len(st.session_state.raw_data)} records")
+                
+                # Show preview
+                with st.expander("📋 Preview Data"):
+                    st.dataframe(st.session_state.raw_data.head())
         
         # Lookup data upload (optional)
         lookup_file = st.file_uploader(
@@ -298,8 +365,10 @@ def main():
         )
         
         if lookup_file is not None:
-            st.session_state.lookup_data = parse_csv_file(lookup_file)
-            st.success(f"✅ Loaded {len(st.session_state.lookup_data)} lookup records")
+            lookup_df = parse_csv_file(lookup_file)
+            if lookup_df is not None:
+                st.session_state.lookup_data = lookup_df
+                st.success(f"✅ Loaded {len(st.session_state.lookup_data)} lookup records")
         
         st.markdown("---")
         
@@ -311,8 +380,11 @@ def main():
                         st.session_state.raw_data,
                         st.session_state.lookup_data
                     )
-                st.success("✅ Data processed successfully!")
-                st.rerun()  # Add this line to force refresh and show the dashboard
+                
+                if st.session_state.processed_data is not None and not st.session_state.processed_data.empty:
+                    st.balloons()
+        else:
+            st.info("👆 Upload production data first")
     
     # Main content area
     if st.session_state.processed_data is not None and not st.session_state.processed_data.empty:
@@ -343,10 +415,10 @@ def main():
             st.markdown("---")
             
             # Export button
-            if st.button("📥 Export Report", use_container_width=True):
+            if len(filtered_df) > 0:
                 csv_data = export_to_csv(filtered_df)
                 st.download_button(
-                    label="Download CSV",
+                    label="📥 Export Report",
                     data=csv_data,
                     file_name=f"productivity_report_{datetime.now().strftime('%Y%m%d')}.csv",
                     mime="text/csv",
@@ -399,12 +471,7 @@ def main():
                 'Deficit': '{:,.0f}',
                 'Productivity %': '{:.1f}',
                 'Eff. Contacts': '{:,.0f}'
-            }).applymap(
-                lambda x: 'color: #10b981; font-weight: bold' if isinstance(x, str) and '🟢' in x
-                else ('color: #f59e0b; font-weight: bold' if isinstance(x, str) and '🟠' in x
-                else ('color: #ef4444; font-weight: bold' if isinstance(x, str) and '🔴' in x else '')),
-                subset=['Status']
-            ),
+            }),
             use_container_width=True,
             hide_index=True
         )
@@ -422,7 +489,7 @@ def main():
         
         1. **Upload Production Data**: Click on the file uploader in the sidebar and select your daily production CSV file
         2. **Upload Lookup Data (Optional)**: Upload team assignment lookup file if you have one
-        3. **Process Data**: Click the "Process Data" button to analyze your data
+        3. **Process Data**: Click the "🔄 Process Data" button to analyze your data
         4. **Explore**: Use filters to view specific teams or agents
         5. **Export**: Download reports as needed
         
