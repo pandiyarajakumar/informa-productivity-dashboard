@@ -72,7 +72,12 @@ def process_production_data(raw_df, lookup_df=None):
         st.info(f"Processing {len(raw_df)} rows from CSV...")
         
         # Show available columns for debugging
-        st.write("Available columns:", list(raw_df.columns))
+        with st.expander("🔍 Debug: Show CSV Structure"):
+            st.write("**Available columns:**", list(raw_df.columns))
+            st.write("**First 3 rows:**")
+            st.dataframe(raw_df.head(3))
+            st.write("**Data types:**")
+            st.write(raw_df.dtypes)
         
         processed_data = []
         
