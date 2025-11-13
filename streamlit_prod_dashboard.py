@@ -312,6 +312,7 @@ def main():
                         st.session_state.lookup_data
                     )
                 st.success("✅ Data processed successfully!")
+                st.rerun()  # Add this line to force refresh and show the dashboard
     
     # Main content area
     if st.session_state.processed_data is not None and not st.session_state.processed_data.empty:
